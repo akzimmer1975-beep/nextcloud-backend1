@@ -1,4 +1,6 @@
 const express = require('express');
+const cors = require("cors");
+app.use(cors());
 const fileUpload = require('express-fileupload');
 const { createClient } = require('webdav');
 const path = require('path');
