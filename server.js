@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require("cors");
-app.use(cors());
+app.use(cors({
+    origin: '*' // erlaubt alle Frontend-Domains
+}));
 const fileUpload = require('express-fileupload');
 const { createClient } = require('webdav');
 const path = require('path');
