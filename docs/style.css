@@ -1,9 +1,0 @@
-body { font-family: Arial; background:#f2f2f2; padding:20px; }
-#logo { text-align:center; margin-bottom:20px; }
-#logo-img { max-width:150px; }
-form { background:#fff; padding:20px; border-radius:8px; border:1px solid #ccc; max-width:500px; margin:0 auto; }
-.upload-container { border:2px dashed #aaa; padding:20px; margin:10px 0; text-align:center; border-radius:6px; cursor:pointer; }
-.upload-container.dragover { border-color:#28a745; background:#eef; }
-.status { margin-top:5px; font-size:0.9em; }
-button { padding:10px 20px; font-size:1em; cursor:pointer; }
-pre#debug { background:#eee; padding:10px; height:200px; overflow:auto; max-width:500px; margin:20px auto; border-radius:6px; }
