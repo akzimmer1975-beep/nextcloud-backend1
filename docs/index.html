@@ -7,7 +7,6 @@
 </head>
 <body>
 
-<!-- Logo -->
 <div id="logo">
   <img src="logo.png" alt="Logo" id="logo-img">
 </div>
@@ -16,7 +15,7 @@
 
 <form id="upload-form">
   <label>Bezirk:
-    <select id="bezirk">
+    <select id="bezirk" required>
       <option value="">--Bitte wählen--</option>
       <option value="Mitte">Mitte</option>
       <option value="Nord">Nord</option>
@@ -26,24 +25,34 @@
     </select>
   </label><br><br>
 
-  <label>BKZ: <input type="text" id="bkz" placeholder="BKZ"></label><br><br>
-  <label>Zahlencode (optional): <input type="password" id="code" placeholder="Code"></label><br><br>
+  <label>BKZ: <input type="text" id="bkz" required></label><br><br>
+  <label>Zahlencode (optional): <input type="password" id="code"></label><br><br>
 
-  <label>Wahlausschreiben:</label>
-  <input type="file" id="wahlausschreiben"><br><br>
+  <div class="upload-container" id="drop-wahlausschreiben" data-filetype="wahlausschreiben">
+    Wahlausschreiben hierher ziehen
+    <input type="file" style="display:none">
+    <div class="status" id="status-wahlausschreiben"></div>
+  </div>
 
-  <label>Wahlvorschlag:</label>
-  <input type="file" id="wahlvorschlag"><br><br>
+  <div class="upload-container" id="drop-wahlvorschlag" data-filetype="wahlvorschlag">
+    Wahlvorschlag hierher ziehen
+    <input type="file" style="display:none">
+    <div class="status" id="status-wahlvorschlag"></div>
+  </div>
 
-  <label>Niederschrift:</label>
-  <input type="file" id="niederschrift"><br><br>
+  <div class="upload-container" id="drop-niederschrift" data-filetype="niederschrift">
+    Niederschrift hierher ziehen
+    <input type="file" style="display:none">
+    <div class="status" id="status-niederschrift"></div>
+  </div>
 
   <button type="button" id="upload-btn">Alles hochladen</button>
 </form>
 
 <h3>Log / Debug:</h3>
-<pre id="log"></pre>
+<pre id="debug"></pre>
 
 <script src="script.js"></script>
 </body>
 </html>
+
