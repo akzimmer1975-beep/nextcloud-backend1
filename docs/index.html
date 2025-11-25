@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Nextcloud Upload Portal</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Logo -->
+<div id="logo">
+  <img src="logo.png" alt="Logo" id="logo-img">
+</div>
+
+<h2>Dateien hochladen</h2>
+
+<form id="upload-form">
+  <label>Bezirk:
+    <select id="bezirk">
+      <option value="">--Bitte wählen--</option>
+      <option value="Mitte">Mitte</option>
+      <option value="Nord">Nord</option>
+      <option value="Süd">Süd</option>
+      <option value="Ost">Ost</option>
+      <option value="West">West</option>
+    </select>
+  </label><br><br>
+
+  <label>BKZ: <input type="text" id="bkz" placeholder="BKZ"></label><br><br>
+  <label>Zahlencode (optional): <input type="password" id="code" placeholder="Code"></label><br><br>
+
+  <label>Wahlausschreiben:</label>
+  <input type="file" id="wahlausschreiben"><br><br>
+
+  <label>Wahlvorschlag:</label>
+  <input type="file" id="wahlvorschlag"><br><br>
+
+  <label>Niederschrift:</label>
+  <input type="file" id="niederschrift"><br><br>
+
+  <button type="button" id="upload-btn">Alles hochladen</button>
+</form>
+
+<h3>Log / Debug:</h3>
+<pre id="log"></pre>
+
+<script src="script.js"></script>
+</body>
+</html>
