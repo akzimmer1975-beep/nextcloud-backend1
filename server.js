@@ -1,20 +1,25 @@
-require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const { createClient } = require("webdav");
-const path = require('path');
-const fs = require('fs').promises; // Async FS
+const pLimit = require('p-limit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Multer-Setup für temporäre Uploads
+// Lokal: .env laden, falls vorhanden
+if (fs.existsSync(path.resolve(__dirname, '.env'))) {
+  require('dotenv').config();
+}
+
+// Multer für temporäre Uploads
 const upload = multer({ dest: '/tmp/uploads' });
 
 // Middleware
 app.use(require('cors')());
 app.use(express.json());
 
-// Nextcloud-Config
+// Nextcloud-Config aus Environment Variables
 const ncUrl = process.env.NEXTCLOUD_URL;
 const ncUser = process.env.NEXTCLOUD_USER;
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
@@ -23,16 +28,47 @@ const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/";
 // WebDAV-Client
 const client = createClient(ncUrl, { username: ncUser, password: ncPass });
 
-// Hilfsfunktion: Ordner sicherstellen
-async function ensureFolder(folderPath) {
-  const exists = await client.exists(folderPath);
-  if (!exists) await client.createDirectory(folderPath);
+// Limit für parallele Uploads
+const limit = pLimit(3);
+
+// Ordner rekursiv erstellen
+async function ensureFolderRecursive(folderPath) {
+  const parts = folderPath.split('/').filter(Boolean);
+  let current = '';
+  for (const part of parts) {
+    current += '/' + part;
+    if (!await client.exists(current)) {
+      await client.createDirectory(current);
+    }
+  }
 }
 
-// Hilfsfunktion: Timestamp
+// Timestamp für Konflikte
 function formatTimestamp(d = new Date()) {
   const z = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+}
+
+// Datei-Upload mit Retry
+async function uploadFileWithRetry(localPath, remotePath, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await new Promise((resolve, reject) => {
+        const readStream = fs.createReadStream(localPath);
+        client.createWriteStream(remotePath, { overwrite: false })
+          .then(writeStream => {
+            readStream.pipe(writeStream);
+            writeStream.on('finish', resolve);
+            writeStream.on('error', reject);
+          })
+          .catch(reject);
+      });
+      return; // erfolgreich
+    } catch (err) {
+      console.warn(`Upload fehlgeschlagen (Versuch ${attempt}/${retries}):`, err.message);
+      if (attempt === retries) throw err;
+    }
+  }
 }
 
 // Upload-Endpoint
@@ -43,32 +79,34 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
     let containers = req.body.containers || [];
     if (typeof containers === 'string') containers = [containers];
 
-    await ensureFolder(ncBasePath);
+    await ensureFolderRecursive(ncBasePath);
     const results = [];
 
-    for (let i = 0; i < req.files.length; i++) {
-      const f = req.files[i];
-      const container = containers[i] || 'container';
-      const ext = path.extname(f.originalname) || '';
-      const baseName = `${bezirk}_${bkz}_${container}`;
-      let remote = path.posix.join(ncBasePath, baseName + ext);
+    const uploadPromises = req.files.map((f, i) =>
+      limit(async () => {
+        const container = containers[i] || 'container';
+        const ext = path.extname(f.originalname) || '';
+        const baseName = `${bezirk}_${bkz}_${container}`;
+        let remote = path.posix.join(ncBasePath, baseName + ext);
 
-      if (await client.exists(remote)) {
-        const ts = formatTimestamp();
-        remote = path.posix.join(ncBasePath, `${baseName}_${ts}${ext}`);
-      }
+        if (await client.exists(remote)) {
+          const ts = formatTimestamp();
+          remote = path.posix.join(ncBasePath, `${baseName}_${ts}${ext}`);
+        }
 
-      // Datei als Buffer lesen (verhindert "body stream already read")
-      const fileBuffer = await fs.readFile(f.path);
-      await client.putFileContents(remote, fileBuffer, { overwrite: false });
+        await uploadFileWithRetry(f.path, remote, 3);
 
-      // Temp-Datei löschen
-      await fs.unlink(f.path);
+        fs.unlink(f.path, (err) => {
+          if (err) console.error("Temp-Datei löschen fehlgeschlagen:", err);
+        });
 
-      results.push({ originalName: f.originalname, remotePath: remote });
-    }
+        results.push({ originalName: f.originalname, remotePath: remote });
+      })
+    );
 
+    await Promise.all(uploadPromises);
     res.json({ ok: true, files: results });
+
   } catch (err) {
     console.error("Upload-Fehler:", err);
     res.status(500).json({ ok: false, message: err.message });
