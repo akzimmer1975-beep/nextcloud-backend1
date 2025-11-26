@@ -1,77 +1,52 @@
-const fs = require('fs');
-const path = require('path');
+require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const { createClient } = require("webdav");
-const pLimit = require('p-limit').default;
+const path = require('path');
+const fs = require('fs');
+const pLimit = require("p-limit").default;
+
+const upload = multer({ dest: '/tmp/uploads' });
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Lokal: .env laden, falls vorhanden
-if (fs.existsSync(path.resolve(__dirname, '.env'))) {
-  require('dotenv').config();
-}
-
-// Multer für temporäre Uploads
-const upload = multer({ dest: '/tmp/uploads' });
-
-// Middleware
 app.use(require('cors')());
 app.use(express.json());
 
-// Nextcloud-Config aus Environment Variables
 const ncUrl = process.env.NEXTCLOUD_URL;
 const ncUser = process.env.NEXTCLOUD_USER;
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
 const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/";
 
-// WebDAV-Client
 const client = createClient(ncUrl, { username: ncUser, password: ncPass });
 
 // Limit für parallele Uploads
 const limit = pLimit(3);
 
-// Ordner rekursiv erstellen
-async function ensureFolderRecursive(folderPath) {
-  const parts = folderPath.split('/').filter(Boolean);
-  let current = '';
-  for (const part of parts) {
-    current += '/' + part;
-    if (!await client.exists(current)) {
-      await client.createDirectory(current);
-    }
-  }
+async function ensureFolder(folderPath) {
+  const exists = await client.exists(folderPath);
+  if (!exists) await client.createDirectory(folderPath);
 }
 
-// Timestamp für Konflikte
 function formatTimestamp(d = new Date()) {
-  const z = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  const z = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}${z(d.getMonth()+1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
 }
 
-// Datei-Upload mit Retry
-async function uploadFileWithRetry(localPath, remotePath, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
+// Upload mit Retry
+async function uploadFileWithRetry(remotePath, localPath, retries = 3) {
+  for (let i = 0; i < retries; i++) {
     try {
-      await new Promise((resolve, reject) => {
-        const readStream = fs.createReadStream(localPath);
-        client.createWriteStream(remotePath, { overwrite: false })
-          .then(writeStream => {
-            readStream.pipe(writeStream);
-            writeStream.on('finish', resolve);
-            writeStream.on('error', reject);
-          })
-          .catch(reject);
-      });
-      return; // erfolgreich
+      await client.putFileContents(remotePath, fs.createReadStream(localPath), { overwrite: false });
+      console.log("Upload erfolgreich:", remotePath);
+      return;
     } catch (err) {
-      console.warn(`Upload fehlgeschlagen (Versuch ${attempt}/${retries}):`, err.message);
-      if (attempt === retries) throw err;
+      console.warn(`Upload fehlgeschlagen (Versuch ${i+1}/${retries}):`, err.message);
+      if (i === retries - 1) throw err;
     }
   }
 }
 
-// Upload-Endpoint
 app.post('/api/upload', upload.array('files'), async (req, res) => {
   try {
     const bezirk = req.body.bezirk || "unknown";
@@ -79,39 +54,33 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
     let containers = req.body.containers || [];
     if (typeof containers === 'string') containers = [containers];
 
-    await ensureFolderRecursive(ncBasePath);
+    await ensureFolder(ncBasePath);
     const results = [];
 
-    const uploadPromises = req.files.map((f, i) =>
-      limit(async () => {
-        const container = containers[i] || 'container';
-        const ext = path.extname(f.originalname) || '';
-        const baseName = `${bezirk}_${bkz}_${container}`;
-        let remote = path.posix.join(ncBasePath, baseName + ext);
+    const uploadTasks = req.files.map((f, i) => limit(async () => {
+      const container = containers[i] || 'container';
+      const ext = path.extname(f.originalname) || '';
+      const baseName = `${bezirk}_${bkz}_${container}`;
+      let remote = path.posix.join(ncBasePath, baseName + ext);
 
-        if (await client.exists(remote)) {
-          const ts = formatTimestamp();
-          remote = path.posix.join(ncBasePath, `${baseName}_${ts}${ext}`);
-        }
+      const exists = await client.exists(remote);
+      if (exists) {
+        const ts = formatTimestamp();
+        remote = path.posix.join(ncBasePath, `${baseName}_${ts}${ext}`);
+      }
 
-        await uploadFileWithRetry(f.path, remote, 3);
+      await uploadFileWithRetry(remote, f.path);
+      fs.unlinkSync(f.path);
 
-        fs.unlink(f.path, (err) => {
-          if (err) console.error("Temp-Datei löschen fehlgeschlagen:", err);
-        });
+      results.push({ originalName: f.originalname, remotePath: remote });
+    }));
 
-        results.push({ originalName: f.originalname, remotePath: remote });
-      })
-    );
+    await Promise.all(uploadTasks);
 
-    await Promise.all(uploadPromises);
     res.json({ ok: true, files: results });
-
   } catch (err) {
-    console.error("Upload-Fehler:", err);
     res.status(500).json({ ok: false, message: err.message });
   }
 });
 
-// Server starten
-app.listen(PORT, () => console.log(`Backend läuft auf Port ${PORT}`));
+app.listen(PORT, () => console.log("Backend läuft auf Port", PORT));
