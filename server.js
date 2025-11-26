@@ -3,7 +3,7 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const { createClient } = require("webdav");
-const pLimit = require('p-limit');
+const pLimit = require('p-limit').default;
 const app = express();
 const PORT = process.env.PORT || 3000;
 
