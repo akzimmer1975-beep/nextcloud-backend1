@@ -1,46 +1,76 @@
-require('dotenv').config();
-const express = require('express');
-const multer = require('multer');
+require("dotenv").config();
+const express = require("express");
+const multer = require("multer");
 const { createClient } = require("webdav");
-const path = require('path');
-const fs = require('fs');
+const path = require("path");
+const fs = require("fs");
 
-const upload = multer({ dest: '/tmp/uploads' });
+const upload = multer({ dest: "/tmp/uploads" });
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(require('cors')());
+app.use(require("cors")());
 app.use(express.json());
 
-// Nextcloud-Konfiguration
+// ---------- NEXTCLOUD KONFIG ----------
+
 const ncUrl = process.env.NEXTCLOUD_URL;
 const ncUser = process.env.NEXTCLOUD_USER;
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
 const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/";
 
-const client = createClient(ncUrl, { username: ncUser, password: ncPass });
+const client = createClient(ncUrl, {
+  username: ncUser,
+  password: ncPass,
+});
 
-// Hilfsfunktion: Ordner erstellen, falls nicht vorhanden
+// ---------- Hilfsfunktionen ----------
+
 async function ensureFolder(folderPath) {
   const exists = await client.exists(folderPath);
-  if (!exists) await client.createDirectory(folderPath);
+  if (!exists) {
+    await client.createDirectory(folderPath);
+  }
 }
 
-// Hilfsfunktion: Timestamp für Dateikonflikte
 function formatTimestamp(d = new Date()) {
-  const z = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${z(d.getMonth()+1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  const z = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(
+    d.getHours()
+  )}${z(d.getMinutes())}${z(d.getSeconds())}`;
 }
 
-// Upload-Route
-app.post('/api/upload', upload.array('files'), async (req, res) => {
+// Append in Nextcloud Logfile
+async function appendLog(entry) {
+  const logFile = path.posix.join(ncBasePath, "upload.log");
+
+  let oldContent = "";
+  try {
+    if (await client.exists(logFile)) {
+      oldContent = await client.getFileContents(logFile, { format: "text" });
+    }
+  } catch (e) {
+    // ignore read errors
+  }
+
+  const newContent = oldContent + entry + "\n";
+
+  await client.putFileContents(logFile, newContent, {
+    overwrite: true,
+  });
+}
+
+// ---------- UPLOAD API ----------
+
+app.post("/api/upload", upload.array("files"), async (req, res) => {
   try {
     const bezirk = req.body.bezirk || "unknown";
     const bkz = req.body.bkz || "unknown";
     let containers = req.body.containers || [];
-    if (typeof containers === 'string') containers = [containers];
 
-    // Pfade für Bezirk und BKZ
+    if (typeof containers === "string") containers = [containers];
+
+    // Ordnerstruktur erzeugen
     const bezirkPath = path.posix.join(ncBasePath, bezirk);
     const bkzPath = path.posix.join(bezirkPath, bkz);
 
@@ -51,32 +81,57 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
 
     for (let i = 0; i < req.files.length; i++) {
       const f = req.files[i];
-      const container = containers[i] || 'container';
-      const ext = path.extname(f.originalname) || '';
+      const container = containers[i] || "container";
+
+      const ext = path.extname(f.originalname) || "";
       const baseName = container;
+
       let remote = path.posix.join(bkzPath, baseName + ext);
 
-      // Prüfen, ob Datei bereits existiert
+      // Wenn Datei existiert → timestamp
       let exists = false;
-      try { exists = await client.exists(remote); } catch(e) { exists = false; }
+      try {
+        exists = await client.exists(remote);
+      } catch (e) {
+        exists = false;
+      }
+
       if (exists) {
         const ts = formatTimestamp();
         remote = path.posix.join(bkzPath, `${baseName}_${ts}${ext}`);
       }
 
       // Datei hochladen
-      await client.putFileContents(remote, fs.createReadStream(f.path), { overwrite: false });
+      await client.putFileContents(
+        remote,
+        fs.createReadStream(f.path),
+        { overwrite: false }
+      );
+
+      // lokale Datei löschen
       fs.unlinkSync(f.path);
 
-      results.push({ originalName: f.originalname, remotePath: remote });
+      // Logs schreiben
+      const logEntry = `${new Date().toISOString()} | Bezirk=${bezirk} | BKZ=${bkz} | Container=${container} | Datei=${remote}`;
+      await appendLog(logEntry);
+
+      results.push({
+        originalName: f.originalname,
+        remotePath: remote,
+        container,
+      });
     }
 
     res.json({ ok: true, files: results });
 
   } catch (err) {
+    console.error("UPLOAD FEHLER:", err);
     res.status(500).json({ ok: false, message: err.message });
   }
 });
 
-app.listen(PORT, () => console.log("Backend läuft auf Port", PORT));
+// ---------- START ----------
 
+app.listen(PORT, () =>
+  console.log("Backend läuft auf Port", PORT)
+);
