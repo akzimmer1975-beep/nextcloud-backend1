@@ -13,7 +13,6 @@ app.use(require("cors")());
 app.use(express.json());
 
 // ---------- NEXTCLOUD KONFIG ----------
-
 const ncUrl = process.env.NEXTCLOUD_URL;
 const ncUser = process.env.NEXTCLOUD_USER;
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
@@ -40,24 +39,41 @@ function formatTimestamp(d = new Date()) {
   )}${z(d.getMinutes())}${z(d.getSeconds())}`;
 }
 
-// Append in Nextcloud Logfile
-async function appendLog(entry) {
-  const logFile = path.posix.join(ncBasePath, "upload.log");
+// CSV-Writer auf Nextcloud
+async function appendCsvLog({ bezirk, bkz, container, originalName, remote }) {
+  const fileName = "upload-log.csv";
+  const csvPath = path.posix.join(ncBasePath, fileName);
 
-  let oldContent = "";
+  let current = "";
+
   try {
-    if (await client.exists(logFile)) {
-      oldContent = await client.getFileContents(logFile, { format: "text" });
+    if (await client.exists(csvPath)) {
+      current = await client.getFileContents(csvPath, { format: "text" });
     }
-  } catch (e) {
-    // ignore read errors
+  } catch (err) {
+    console.warn("CSV read error:", err);
   }
 
-  const newContent = oldContent + entry + "\n";
+  // Header hinzufügen, falls Datei neu ist
+  if (!current.includes("DatumZeit;Bezirk;BKZ;Container;Original;Remote")) {
+    current =
+      "DatumZeit;Bezirk;BKZ;Container;Original;Remote\n";
+  }
 
-  await client.putFileContents(logFile, newContent, {
-    overwrite: true,
-  });
+  const line = [
+    new Date().toISOString(),
+    bezirk,
+    bkz,
+    container,
+    originalName,
+    remote
+  ]
+    .map((v) => String(v).replace(/;/g, ",")) // Sicherheit
+    .join(";");
+
+  const newContent = current + line + "\n";
+
+  await client.putFileContents(csvPath, newContent, { overwrite: true });
 }
 
 // ---------- UPLOAD API ----------
@@ -111,9 +127,14 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
       // lokale Datei löschen
       fs.unlinkSync(f.path);
 
-      // Logs schreiben
-      const logEntry = `${new Date().toISOString()} | Bezirk=${bezirk} | BKZ=${bkz} | Container=${container} | Datei=${remote}`;
-      await appendLog(logEntry);
+      // CSV-Logging
+      await appendCsvLog({
+        bezirk,
+        bkz,
+        container,
+        originalName: f.originalname,
+        remote
+      });
 
       results.push({
         originalName: f.originalname,
