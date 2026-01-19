@@ -4,12 +4,13 @@ const multer = require("multer");
 const { createClient } = require("webdav");
 const path = require("path");
 const fs = require("fs");
+const cors = require("cors");
 
 const upload = multer({ dest: "/tmp/uploads" });
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(require("cors")());
+app.use(cors());
 app.use(express.json());
 
 // ---------- NEXTCLOUD KONFIG ----------
@@ -23,11 +24,10 @@ const client = createClient(ncUrl, {
   password: ncPass,
 });
 
-// ---------- Hilfsfunktionen ----------
+// ---------- HILFSFUNKTIONEN ----------
 
 async function ensureFolder(folderPath) {
-  const exists = await client.exists(folderPath);
-  if (!exists) {
+  if (!(await client.exists(folderPath))) {
     await client.createDirectory(folderPath);
   }
 }
@@ -39,7 +39,7 @@ function formatTimestamp(d = new Date()) {
   )}${z(d.getMinutes())}${z(d.getSeconds())}`;
 }
 
-// CSV-Writer auf Nextcloud
+// ---------- CSV LOG ----------
 async function appendCsvLog({ bezirk, bkz, container, originalName, remote }) {
   const fileName = "upload-log.csv";
   const csvPath = path.posix.join(ncBasePath, fileName);
@@ -54,8 +54,7 @@ async function appendCsvLog({ bezirk, bkz, container, originalName, remote }) {
     console.warn("CSV read error:", err);
   }
 
-  // Header hinzufügen, falls Datei neu ist
-  if (!current.includes("DatumZeit;Bezirk;BKZ;Container;Original;Remote")) {
+  if (!current.startsWith("DatumZeit;")) {
     current =
       "DatumZeit;Bezirk;BKZ;Container;Original;Remote\n";
   }
@@ -68,25 +67,29 @@ async function appendCsvLog({ bezirk, bkz, container, originalName, remote }) {
     originalName,
     remote
   ]
-    .map((v) => String(v).replace(/;/g, ",")) // Sicherheit
+    .map(v => String(v).replace(/;/g, ","))
     .join(";");
 
-  const newContent = current + line + "\n";
-
-  await client.putFileContents(csvPath, newContent, { overwrite: true });
+  await client.putFileContents(
+    csvPath,
+    current + line + "\n",
+    { overwrite: true }
+  );
 }
 
 // ---------- UPLOAD API ----------
-
 app.post("/api/upload", upload.array("files"), async (req, res) => {
   try {
-    const bezirk = req.body.bezirk || "unknown";
-    const bkz = req.body.bkz || "unknown";
+    const bezirk = (req.body.bezirk || "").replace(/[^A-Za-zÄÖÜäöü\-]/g, "");
+    const bkz = (req.body.bkz || "").replace(/[^\d]/g, "");
     let containers = req.body.containers || [];
+
+    if (!bezirk || !bkz) {
+      return res.status(400).json({ ok: false, message: "Bezirk oder BKZ fehlt" });
+    }
 
     if (typeof containers === "string") containers = [containers];
 
-    // Ordnerstruktur erzeugen
     const bezirkPath = path.posix.join(ncBasePath, bezirk);
     const bkzPath = path.posix.join(bezirkPath, bkz);
 
@@ -97,37 +100,22 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
 
     for (let i = 0; i < req.files.length; i++) {
       const f = req.files[i];
-      const container = containers[i] || "container";
-
+      const container = containers[i] || "datei";
       const ext = path.extname(f.originalname) || "";
-      const baseName = container;
 
-      let remote = path.posix.join(bkzPath, baseName + ext);
+      // 🔥 IMMER Zeitstempel
+      const ts = formatTimestamp();
+      const remoteFileName = `${container}_${ts}${ext}`;
+      const remote = path.posix.join(bkzPath, remoteFileName);
 
-      // Wenn Datei existiert → timestamp
-      let exists = false;
-      try {
-        exists = await client.exists(remote);
-      } catch (e) {
-        exists = false;
-      }
-
-      if (exists) {
-        const ts = formatTimestamp();
-        remote = path.posix.join(bkzPath, `${baseName}_${ts}${ext}`);
-      }
-
-      // Datei hochladen
       await client.putFileContents(
         remote,
         fs.createReadStream(f.path),
         { overwrite: false }
       );
 
-      // lokale Datei löschen
       fs.unlinkSync(f.path);
 
-      // CSV-Logging
       await appendCsvLog({
         bezirk,
         bkz,
@@ -140,6 +128,7 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
         originalName: f.originalname,
         remotePath: remote,
         container,
+        timestamp: ts
       });
     }
 
@@ -151,8 +140,41 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
   }
 });
 
-// ---------- START ----------
+// ---------- DATEILISTE API ----------
+app.get("/api/files", async (req, res) => {
+  try {
+    const bezirk = (req.query.bezirk || "").replace(/[^A-Za-zÄÖÜäöü\-]/g, "");
+    const bkz = (req.query.bkz || "").replace(/[^\d]/g, "");
 
-app.listen(PORT, () =>
-  console.log("Backend läuft auf Port", PORT)
-);
+    if (!bezirk || !bkz) {
+      return res.status(400).json({ error: "Bezirk oder BKZ fehlt" });
+    }
+
+    const folderPath = path.posix.join(ncBasePath, bezirk, bkz);
+
+    if (!(await client.exists(folderPath))) {
+      return res.json([]);
+    }
+
+    const contents = await client.getDirectoryContents(folderPath);
+
+    const files = contents
+      .filter(f => f.type === "file")
+      .map(f => ({
+        name: f.basename,
+        lastModified: f.lastmod
+      }))
+      .sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
+
+    res.json(files);
+
+  } catch (err) {
+    console.error("FEHLER /api/files:", err);
+    res.status(500).json({ error: "Dateiliste konnte nicht geladen werden" });
+  }
+});
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log("Backend läuft auf Port", PORT);
+});
