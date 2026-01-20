@@ -17,29 +17,29 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// -------------------- MULTER SETUP --------------------
-const uploadDir = path.join(os.tmpdir(), "uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const upload = multer({ dest: uploadDir });
+const upload = multer({
+  dest: path.join(os.tmpdir(), "uploads")
+});
 
 // -------------------- NEXTCLOUD CONFIG --------------------
-const ncUrl = process.env.NEXTCLOUD_URL;              // z.B. https://portal.gdl-jugend.de
-const ncUser = process.env.NEXTCLOUD_USER;            // z.B. AndreasZimmer
+const ncUrl = process.env.NEXTCLOUD_URL;              // https://portal.gdl-jugend.de
+const ncUser = process.env.NEXTCLOUD_USER;            // AndreasZimmer
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
 const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/Documents/BR Wahl 2026";
 
-// WebDAV NUR für Ordner & Listing
-const client = createClient(`${ncUrl}/remote.php/dav`, {
-  username: ncUser,
-  password: ncPass
-});
+// ⚠️ WICHTIG: WebDAV IMMER bis /files/<user>
+const client = createClient(
+  `${ncUrl}/remote.php/dav/files/${ncUser}`,
+  {
+    username: ncUser,
+    password: ncPass
+  }
+);
 
 // -------------------- HELPERS --------------------
 async function ensureFolder(folderPath) {
-  if (!(await client.exists(folderPath))) {
+  const exists = await client.exists(folderPath);
+  if (!exists) {
     await client.createDirectory(folderPath);
   }
 }
@@ -51,7 +51,7 @@ function formatTimestamp(d = new Date()) {
   )}${z(d.getMinutes())}${z(d.getSeconds())}`;
 }
 
-// -------------------- RAW HTTPS UPLOAD (STABIL) --------------------
+// -------------------- STABILER RAW HTTPS UPLOAD --------------------
 async function uploadToNextcloud(remoteUrl, buffer) {
   return new Promise((resolve, reject) => {
     const url = new URL(remoteUrl);
@@ -60,8 +60,7 @@ async function uploadToNextcloud(remoteUrl, buffer) {
       {
         method: "PUT",
         hostname: url.hostname,
-        // 🔑 wichtig: Pfad encoden (Leerzeichen/Umlaute)
-        path: encodeURI(url.pathname),
+        path: url.pathname,
         auth: `${ncUser}:${ncPass}`,
         headers: {
           "Content-Length": buffer.length,
@@ -74,7 +73,7 @@ async function uploadToNextcloud(remoteUrl, buffer) {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve();
         } else {
-          reject(new Error("Nextcloud HTTP " + res.statusCode));
+          reject(new Error(`Nextcloud HTTP ${res.statusCode}`));
         }
       }
     );
@@ -111,30 +110,30 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
 
     const results = [];
 
-    // 🔁 UPLOAD-LOOP (korrekt platziert)
     for (let i = 0; i < req.files.length; i++) {
       const f = req.files[i];
       const container = containers[i] || "datei";
       const ext = path.extname(f.originalname) || "";
       const ts = formatTimestamp();
 
+      // 🔑 IMMER Zeitstempel im Dateinamen
       const fileName = `${container}_${ts}${ext}`;
       const remotePath = path.posix.join(bkzPath, fileName);
 
-      const fileBuffer = fs.readFileSync(f.path);
+      const buffer = fs.readFileSync(f.path);
 
       const remoteUrl =
         `${ncUrl}/remote.php/dav/files/${ncUser}` +
         remotePath;
 
-      await uploadToNextcloud(remoteUrl, fileBuffer);
+      await uploadToNextcloud(remoteUrl, buffer);
 
       fs.unlinkSync(f.path);
 
       results.push({
         name: fileName,
         path: remotePath,
-        size: fileBuffer.length
+        size: buffer.length
       });
     }
 
@@ -153,7 +152,7 @@ app.get("/api/files", async (req, res) => {
     const bkz = (req.query.bkz || "").replace(/[^\d]/g, "");
 
     if (!bezirk || !bkz) {
-      return res.status(400).json([]);
+      return res.json([]);
     }
 
     const folderPath = path.posix.join(ncBasePath, bezirk, bkz);
