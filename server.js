@@ -32,7 +32,7 @@ const ncPass = process.env.NEXTCLOUD_PASSWORD;
 const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/Documents/BR Wahl 2026";
 
 // WebDAV NUR für Ordner & Listing
-const client = createClient(ncUrl, {
+const client = createClient(`${ncUrl}/remote.php/dav`, {
   username: ncUser,
   password: ncPass
 });
