@@ -19,9 +19,19 @@ const ncUser = process.env.NEXTCLOUD_USER;
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
 const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/";
 
+const https = require("https");
+
 const client = createClient(ncUrl, {
   username: ncUser,
   password: ncPass,
+  axios: {
+    httpsAgent: new https.Agent({
+      keepAlive: false
+    }),
+    timeout: 30000,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity
+  }
 });
 
 // ---------- HILFSFUNKTIONEN ----------
@@ -113,7 +123,12 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
 await client.putFileContents(
   remote,
   fileBuffer,
-  { overwrite: false }
+  {
+    overwrite: false,
+    headers: {
+      "Content-Length": fileBuffer.length
+    }
+  }
 );
 
 
