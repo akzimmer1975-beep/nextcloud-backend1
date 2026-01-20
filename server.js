@@ -1,41 +1,43 @@
 require("dotenv").config();
+
 const express = require("express");
 const multer = require("multer");
-const { createClient } = require("webdav");
+const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
-const cors = require("cors");
+const os = require("os");
+const https = require("https");
+const { URL } = require("url");
+const { createClient } = require("webdav");
 
-const upload = multer({ dest: "/tmp/uploads" });
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// -------------------- MIDDLEWARE --------------------
 app.use(cors());
 app.use(express.json());
 
-// ---------- NEXTCLOUD KONFIG ----------
-const ncUrl = process.env.NEXTCLOUD_URL;
-const ncUser = process.env.NEXTCLOUD_USER;
+// -------------------- MULTER SETUP --------------------
+const uploadDir = path.join(os.tmpdir(), "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const upload = multer({ dest: uploadDir });
+
+// -------------------- NEXTCLOUD CONFIG --------------------
+const ncUrl = process.env.NEXTCLOUD_URL;              // z.B. https://portal.gdl-jugend.de
+const ncUser = process.env.NEXTCLOUD_USER;            // z.B. AndreasZimmer
 const ncPass = process.env.NEXTCLOUD_PASSWORD;
-const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/";
+const ncBasePath = process.env.NEXTCLOUD_BASE_PATH || "/Documents/BR Wahl 2026";
 
-const https = require("https");
-
+// WebDAV NUR für Ordner & Listing
 const client = createClient(ncUrl, {
   username: ncUser,
-  password: ncPass,
-  axios: {
-    httpsAgent: new https.Agent({
-      keepAlive: false
-    }),
-    timeout: 30000,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity
-  }
+  password: ncPass
 });
 
-// ---------- HILFSFUNKTIONEN ----------
-
+// -------------------- HELPERS --------------------
 async function ensureFolder(folderPath) {
   if (!(await client.exists(folderPath))) {
     await client.createDirectory(folderPath);
@@ -49,47 +51,47 @@ function formatTimestamp(d = new Date()) {
   )}${z(d.getMinutes())}${z(d.getSeconds())}`;
 }
 
-// ---------- CSV LOG ----------
-async function appendCsvLog({ bezirk, bkz, container, originalName, remote }) {
-  const fileName = "upload-log.csv";
-  const csvPath = path.posix.join(ncBasePath, fileName);
+// -------------------- RAW HTTPS UPLOAD (STABIL) --------------------
+async function uploadToNextcloud(remoteUrl, buffer) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(remoteUrl);
 
-  let current = "";
+    const req = https.request(
+      {
+        method: "PUT",
+        hostname: url.hostname,
+        // 🔑 wichtig: Pfad encoden (Leerzeichen/Umlaute)
+        path: encodeURI(url.pathname),
+        auth: `${ncUser}:${ncPass}`,
+        headers: {
+          "Content-Length": buffer.length,
+          "Content-Type": "application/octet-stream",
+          "Connection": "close"
+        },
+        timeout: 30000
+      },
+      (res) => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve();
+        } else {
+          reject(new Error("Nextcloud HTTP " + res.statusCode));
+        }
+      }
+    );
 
-  try {
-    if (await client.exists(csvPath)) {
-      current = await client.getFileContents(csvPath, { format: "text" });
-    }
-  } catch (err) {
-    console.warn("CSV read error:", err);
-  }
-
-  if (!current.startsWith("DatumZeit;")) {
-    current =
-      "DatumZeit;Bezirk;BKZ;Container;Original;Remote\n";
-  }
-
-  const line = [
-    new Date().toISOString(),
-    bezirk,
-    bkz,
-    container,
-    originalName,
-    remote
-  ]
-    .map(v => String(v).replace(/;/g, ","))
-    .join(";");
-
-  await client.putFileContents(
-    csvPath,
-    current + line + "\n",
-    { overwrite: true }
-  );
+    req.on("error", reject);
+    req.write(buffer);
+    req.end();
+  });
 }
 
-// ---------- UPLOAD API ----------
+// -------------------- UPLOAD API --------------------
 app.post("/api/upload", upload.array("files"), async (req, res) => {
   try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ ok: false, message: "Keine Dateien empfangen" });
+    }
+
     const bezirk = (req.body.bezirk || "").replace(/[^A-Za-zÄÖÜäöü\-]/g, "");
     const bkz = (req.body.bkz || "").replace(/[^\d]/g, "");
     let containers = req.body.containers || [];
@@ -103,50 +105,36 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
     const bezirkPath = path.posix.join(ncBasePath, bezirk);
     const bkzPath = path.posix.join(bezirkPath, bkz);
 
+    await ensureFolder(ncBasePath);
     await ensureFolder(bezirkPath);
     await ensureFolder(bkzPath);
 
     const results = [];
 
+    // 🔁 UPLOAD-LOOP (korrekt platziert)
     for (let i = 0; i < req.files.length; i++) {
       const f = req.files[i];
       const container = containers[i] || "datei";
       const ext = path.extname(f.originalname) || "";
-
-      // 🔥 IMMER Zeitstempel
       const ts = formatTimestamp();
-      const remoteFileName = `${container}_${ts}${ext}`;
-      const remote = path.posix.join(bkzPath, remoteFileName);
+
+      const fileName = `${container}_${ts}${ext}`;
+      const remotePath = path.posix.join(bkzPath, fileName);
 
       const fileBuffer = fs.readFileSync(f.path);
 
-await client.putFileContents(
-  remote,
-  fileBuffer,
-  {
-    overwrite: false,
-    headers: {
-      "Content-Length": fileBuffer.length
-    }
-  }
-);
+      const remoteUrl =
+        `${ncUrl}/remote.php/dav/files/${ncUser}` +
+        remotePath;
 
+      await uploadToNextcloud(remoteUrl, fileBuffer);
 
       fs.unlinkSync(f.path);
 
-      await appendCsvLog({
-        bezirk,
-        bkz,
-        container,
-        originalName: f.originalname,
-        remote
-      });
-
       results.push({
-        originalName: f.originalname,
-        remotePath: remote,
-        container,
-        timestamp: ts
+        name: fileName,
+        path: remotePath,
+        size: fileBuffer.length
       });
     }
 
@@ -158,14 +146,14 @@ await client.putFileContents(
   }
 });
 
-// ---------- DATEILISTE API ----------
+// -------------------- FILE LIST API --------------------
 app.get("/api/files", async (req, res) => {
   try {
     const bezirk = (req.query.bezirk || "").replace(/[^A-Za-zÄÖÜäöü\-]/g, "");
     const bkz = (req.query.bkz || "").replace(/[^\d]/g, "");
 
     if (!bezirk || !bkz) {
-      return res.status(400).json({ error: "Bezirk oder BKZ fehlt" });
+      return res.status(400).json([]);
     }
 
     const folderPath = path.posix.join(ncBasePath, bezirk, bkz);
@@ -180,19 +168,20 @@ app.get("/api/files", async (req, res) => {
       .filter(f => f.type === "file")
       .map(f => ({
         name: f.basename,
-        lastModified: f.lastmod
+        lastModified: f.lastmod,
+        size: f.size
       }))
       .sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
 
     res.json(files);
 
   } catch (err) {
-    console.error("FEHLER /api/files:", err);
-    res.status(500).json({ error: "Dateiliste konnte nicht geladen werden" });
+    console.error("FILES API ERROR:", err);
+    res.status(500).json([]);
   }
 });
 
-// ---------- START ----------
+// -------------------- START --------------------
 app.listen(PORT, () => {
   console.log("Backend läuft auf Port", PORT);
 });
