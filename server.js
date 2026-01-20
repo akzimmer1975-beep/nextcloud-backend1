@@ -108,11 +108,14 @@ app.post("/api/upload", upload.array("files"), async (req, res) => {
       const remoteFileName = `${container}_${ts}${ext}`;
       const remote = path.posix.join(bkzPath, remoteFileName);
 
-      await client.putFileContents(
-        remote,
-        fs.createReadStream(f.path),
-        { overwrite: false }
-      );
+      const fileBuffer = fs.readFileSync(f.path);
+
+await client.putFileContents(
+  remote,
+  fileBuffer,
+  { overwrite: false }
+);
+
 
       fs.unlinkSync(f.path);
 
